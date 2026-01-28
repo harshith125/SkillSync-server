@@ -13,21 +13,25 @@ const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
   'https://skill-sync-gold.vercel.app',
-  'https://skill-sync-gold.vercel.app/',
   'https://www.myskillsync.me',
-  'https://myskillsync.me'
+  'https://myskillsync.me',
+  'https://www.myskillsync.me/',
+  'https://myskillsync.me/'
 ];
 
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
       console.log('Blocked by CORS:', origin);
+      // For debugging, we can verify what origin is failing
       callback(new Error('Not allowed by CORS'));
     }
-  },
-  credentials: true
+  }
 }));
 app.use(express.json());
 
