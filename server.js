@@ -13,7 +13,9 @@ const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
   'https://skill-sync-gold.vercel.app',
-  'https://skill-sync-gold.vercel.app/'
+  'https://skill-sync-gold.vercel.app/',
+  'https://www.myskillsync.me',
+  'https://myskillsync.me'
 ];
 
 app.use(cors({
