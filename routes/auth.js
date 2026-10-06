@@ -53,7 +53,7 @@ router.post('/register', async (req, res) => {
         );
     } catch (err) {
         console.error(err.message);
-        res.status(500).json({ msg: 'Server error: ' + err.message });
+        res.status(500).send('Server error');
     }
 });
 
@@ -64,10 +64,6 @@ router.post('/login', async (req, res) => {
     const { email, password } = req.body;
 
     try {
-        if (!email || !password) {
-            return res.status(400).json({ msg: 'Please provide both email and password' });
-        }
-
         let user = await User.findOne({ email });
 
         if (!user) {
@@ -98,7 +94,7 @@ router.post('/login', async (req, res) => {
         );
     } catch (err) {
         console.error(err.message);
-        res.status(500).json({ msg: 'Server error: ' + err.message });
+        res.status(500).send('Server error');
     }
 });
 
@@ -107,84 +103,13 @@ router.post('/login', async (req, res) => {
 // @access  Private
 router.get('/me', auth, async (req, res) => {
     try {
-        const user = await User.findById(req.user.id).select('-password');
+        const user = await User.findById(req.user.id).select('-password -googleTokens');
         res.json(user);
     } catch (err) {
         console.error(err.message);
         res.status(500).send('Server Error');
     }
 });
-
-// Multer for Profile Picture
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-
-// Ensure upload directory exists
-const uploadDir = path.join(__dirname, '../../client/public/uploads');
-if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, uploadDir)
-    },
-    filename: function (req, file, cb) {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
-        cb(null, 'profile-' + uniqueSuffix + path.extname(file.originalname))
-    }
-});
-
-const upload = multer({
-    storage: storage,
-    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
-    fileFilter: (req, file, cb) => {
-        const filetypes = /jpeg|jpg|png|webp/;
-        const mimetype = filetypes.test(file.mimetype);
-        const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-        if (mimetype && extname) {
-            return cb(null, true);
-        }
-        cb(new Error("Error: File upload only supports: jpeg, jpg, png, webp"));
-    }
-});
-
-// @route   POST api/auth/profile-picture
-// @desc    Upload profile picture
-// @access  Private
-router.post('/profile-picture', auth, (req, res) => {
-    upload.single('profilePicture')(req, res, async (err) => {
-        if (err instanceof multer.MulterError) {
-            // A Multer error occurred when uploading.
-            return res.status(400).json({ msg: `Upload Error: ${err.message}` });
-        } else if (err) {
-            // An unknown error occurred when uploading.
-            return res.status(400).json({ msg: err.message });
-        }
-
-        // Everything went fine.
-        try {
-            if (!req.file) {
-                return res.status(400).json({ msg: 'No file uploaded' });
-            }
-
-            const imageUrl = `/uploads/${req.file.filename}`;
-
-            let user = await User.findById(req.user.id);
-            if (!user) return res.status(404).json({ msg: 'User not found' });
-
-            user.profilePicture = imageUrl;
-            await user.save();
-
-            res.json({ profilePicture: imageUrl });
-        } catch (serverErr) {
-            console.error(serverErr);
-            res.status(500).json({ msg: 'Server Error: ' + serverErr.message });
-        }
-    });
-});
-
 
 // @route   PUT api/auth/profile
 // @desc    Update user profile
@@ -204,12 +129,6 @@ router.put('/profile', auth, async (req, res) => {
 
         // Check if isOpenToWork is being toggled ON
         const wasOpen = user.isOpenToWork;
-
-        // Ensure isOpenToWork is correctly parsed as boolean
-        if (updateData.isOpenToWork !== undefined) {
-            updateData.isOpenToWork = updateData.isOpenToWork === true || updateData.isOpenToWork === 'true';
-        }
-
         const nowOpen = updateData.isOpenToWork;
 
         // Update fields
@@ -220,25 +139,142 @@ router.put('/profile', auth, async (req, res) => {
         ).select('-password');
 
         // Trigger matching if candidate toggled 'open to work' to true
-        // AND ONLY IF IT WAS NOT OPEN BEFORE. This prevents spamming on every update.
-        if (user.role === 'candidate' && !wasOpen && nowOpen) {
-            // Lazy load to avoid circular dependency issues if any
-            try {
-                const { matchCandidateToJobs } = require('../services/matchingService');
-                if (matchCandidateToJobs) matchCandidateToJobs(user);
-            } catch (e) {
-                console.warn("Matching service not ready", e.message);
-            }
+        if (user.role === 'candidate' && !wasOpen && nowOpen === "true" || user.role === 'candidate' && !wasOpen && nowOpen === true) {
+            const { matchCandidateToJobs } = require('../services/matchingService');
+            matchCandidateToJobs(user);
         }
 
         res.json(user);
     } catch (err) {
-        console.error(err.message, err); // Log the full error
-        // If it's a validation error, return the specific message
-        if (err.name === 'ValidationError') {
-            return res.status(400).json({ msg: err.message });
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
+// @route   POST api/auth/forgot-password
+// @desc    Send password reset email with token link
+// @access  Public
+router.post('/forgot-password', async (req, res) => {
+    const { email } = req.body;
+
+    if (!email) {
+        return res.status(400).json({ msg: 'Please provide a valid email address.' });
+    }
+
+    try {
+        const crypto = require('crypto');
+        const { sendPasswordResetEmail } = require('../services/emailService');
+
+        const user = await User.findOne({ email: email.toLowerCase().trim() });
+
+        if (!user) {
+            return res.status(404).json({ msg: 'No registered account found with this email address.' });
         }
-        res.status(500).json({ msg: 'Server Error: ' + err.message });
+
+        // Generate 32-byte secure reset token
+        const resetToken = crypto.randomBytes(32).toString('hex');
+
+        // Set reset token and expiration (60 minutes from now)
+        user.resetPasswordToken = resetToken;
+        user.resetPasswordExpires = new Date(Date.now() + 3600000);
+        await user.save();
+
+        const clientBaseUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+        const resetUrl = `${clientBaseUrl}/reset-password/${resetToken}`;
+
+        // Send reset email via Nodemailer
+        let emailSent = false;
+        try {
+            emailSent = await sendPasswordResetEmail(user.email, resetUrl);
+        } catch (mailErr) {
+            console.warn('⚠️ Nodemailer delivery error:', mailErr.message);
+            emailSent = false;
+        }
+
+        console.log(`\n======================================================`);
+        console.log(`🔑 PASSWORD RESET LINK GENERATED FOR: ${user.email}`);
+        console.log(`🔗 RESET URL: ${resetUrl}`);
+        console.log(`📧 Email Delivered to SMTP: ${emailSent ? 'YES' : 'NO (Check Gmail App Password in .env)'}`);
+        console.log(`======================================================\n`);
+
+        res.json({
+            success: true,
+            emailSent,
+            resetUrl,
+            msg: emailSent
+                ? `A password reset link has been dispatched to ${user.email}. Please check your inbox (and spam folder).`
+                : `Password reset link created! (SMTP error: Gmail rejected credentials). Use the link below to reset your password directly.`
+        });
+    } catch (err) {
+        console.error('Forgot password error:', err);
+        res.status(500).json({ msg: 'Server error processing password reset request.' });
+    }
+});
+
+// @route   GET api/auth/verify-reset-token/:token
+// @desc    Verify if a password reset token is valid and unexpired
+// @access  Public
+router.get('/verify-reset-token/:token', async (req, res) => {
+    try {
+        const { token } = req.params;
+        const user = await User.findOne({
+            resetPasswordToken: token,
+            resetPasswordExpires: { $gt: Date.now() }
+        });
+
+        if (!user) {
+            return res.status(400).json({
+                valid: false,
+                msg: 'Password reset link is invalid or has expired. Please request a new one.'
+            });
+        }
+
+        res.json({ valid: true, email: user.email });
+    } catch (err) {
+        console.error('Verify reset token error:', err);
+        res.status(500).json({ valid: false, msg: 'Server error validating token.' });
+    }
+});
+
+// @route   POST api/auth/reset-password/:token
+// @desc    Set new password using valid reset token
+// @access  Public
+router.post('/reset-password/:token', async (req, res) => {
+    const { token } = req.params;
+    const { password } = req.body;
+
+    if (!password || password.length < 6) {
+        return res.status(400).json({ msg: 'Password must be at least 6 characters long.' });
+    }
+
+    try {
+        const user = await User.findOne({
+            resetPasswordToken: token,
+            resetPasswordExpires: { $gt: Date.now() }
+        });
+
+        if (!user) {
+            return res.status(400).json({
+                msg: 'Password reset token is invalid or has expired. Please request a new link.'
+            });
+        }
+
+        // Hash new password
+        const salt = await bcrypt.genSalt(10);
+        user.password = await bcrypt.hash(password, salt);
+
+        // Invalidate token
+        user.resetPasswordToken = null;
+        user.resetPasswordExpires = null;
+        await user.save();
+
+        res.json({
+            success: true,
+            msg: 'Your password has been successfully reset! You can now log in with your new password.'
+        });
+    } catch (err) {
+        console.error('Reset password error:', err);
+        res.status(500).json({ msg: 'Server error updating password.' });
     }
 });
 

@@ -61,9 +61,6 @@ const UserSchema = new mongoose.Schema({
     resume: {
         type: String, // URL to file
     },
-    profilePicture: {
-        type: String, // URL to image
-    },
     links: {
         linkedin: String,
         github: String,
@@ -84,6 +81,50 @@ const UserSchema = new mongoose.Schema({
     },
     aboutCompany: {
         type: String
+    },
+
+    // Google OAuth 2.0 Integration
+    isGoogleConnected: {
+        type: Boolean,
+        default: false
+    },
+    googleTokens: {
+        access_token: String,
+        refresh_token: String,
+        scope: String,
+        token_type: String,
+        expiry_date: Number,
+        googleEmail: String
+    },
+
+    // SkillSync PRO Subscription
+    isPro: {
+        type: Boolean,
+        default: false
+    },
+    proPlan: {
+        type: String,
+        enum: ['1_month', '3_months', '6_months', null],
+        default: null
+    },
+    proExpiresAt: {
+        type: Date,
+        default: null
+    },
+    paymentHistory: [{
+        plan: String,
+        amount: Number,
+        utrNumber: String,
+        status: { type: String, default: 'approved' },
+        paidAt: { type: Date, default: Date.now }
+    }],
+    resetPasswordToken: {
+        type: String,
+        default: null
+    },
+    resetPasswordExpires: {
+        type: Date,
+        default: null
     }
 }, { timestamps: true });
 

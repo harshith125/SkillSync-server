@@ -16,6 +16,14 @@ const ApplicationSchema = new mongoose.Schema({
         enum: ['applied', 'in-progress', 'shortlisted', 'interview', 'rejected', 'offer'],
         default: 'applied'
     },
+    currentStage: {
+        type: String,
+        default: 'Applied'
+    },
+    stageHistory: [{
+        stage: String,
+        changedAt: { type: Date, default: Date.now }
+    }],
     appliedAt: {
         type: Date,
         default: Date.now
@@ -24,6 +32,16 @@ const ApplicationSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
+    aiSummary: {
+        type: String,
+        default: ''
+    },
+    aiStrengths: [{
+        type: String
+    }],
+    aiWeaknesses: [{
+        type: String
+    }],
     feedback: {
         type: String
     },

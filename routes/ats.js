@@ -1,17 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const pdfParse = require('pdf-parse'); // Downgraded to 1.1.1 to fix "is not a function" error
+const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
 const fs = require('fs');
 const auth = require('../middleware/auth');
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-const natural = require('natural');
-const tokenizer = new natural.WordTokenizer();
-
-// Gemini AI Setup
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 // Setup multer for memory storage (we process in memory)
 const upload = multer({
@@ -19,31 +12,26 @@ const upload = multer({
     limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
 });
 
-// Helper: Keyword matching with NLP
+// Helper: Keyword matching
 const checkKeywords = (text, jd) => {
-    // If no JD, we extract key terms from the resume itself to judge "General Quality"
-    const words = tokenizer.tokenize(text.toLowerCase());
-    const commonWords = ['the', 'and', 'with', 'for', 'from', 'that', 'this', 'have', 'been', 'was', 'were'];
+    if (!jd) return { score: 10, matched: [], missing: [] }; // Default low score if no JD
 
-    if (!jd) {
-        const uniqueWords = [...new Set(words.filter(w => w.length > 5 && !commonWords.includes(w)))];
-        // Score based on vocabulary size and complexity (Mocking a general ATS)
-        return {
-            score: Math.min(uniqueWords.length / 1.5, 85), // Max 85 for general resumes
-            matched: uniqueWords.slice(0, 5),
-            missing: ["Add Job Description for targeting"]
-        };
-    }
+    // Normalize text
+    const cleanText = text.toLowerCase();
+    const cleanJD = jd.toLowerCase();
 
-    const jdWords = tokenizer.tokenize(jd.toLowerCase());
-    const uniqueJD = [...new Set(jdWords.filter(w => w.length > 4 && !commonWords.includes(w)))];
+    // Extract keywords from JD (Simple approach: words > 4 chars, ignoring common stops)
+    // In production, use NLP (Natural) or a library
+    const stopWords = ['this', 'that', 'with', 'from', 'have', 'will', 'your', 'their', 'only', 'also', 'experience', 'knowledge', 'skills', 'ability', 'work', 'year', 'years'];
+    const jdWords = cleanJD.match(/\b[a-z]{4,}\b/g) || [];
+    const uniqueKeywords = [...new Set(jdWords.filter(w => !stopWords.includes(w)))];
 
     let matches = 0;
     const matchedWords = [];
     const missingWords = [];
 
-    uniqueJD.forEach(word => {
-        if (text.toLowerCase().includes(word)) {
+    uniqueKeywords.forEach(word => {
+        if (cleanText.includes(word)) {
             matches++;
             matchedWords.push(word);
         } else {
@@ -51,11 +39,11 @@ const checkKeywords = (text, jd) => {
         }
     });
 
-    const percentage = uniqueJD.length > 0 ? (matches / uniqueJD.length) * 100 : 100;
+    const percentage = uniqueKeywords.length > 0 ? (matches / uniqueKeywords.length) * 100 : 100;
     return {
-        score: Math.min(percentage, 100),
-        matched: matchedWords.slice(0, 10),
-        missing: missingWords.slice(0, 5)
+        score: Math.min(percentage, 100), // Raw percentage
+        matched: matchedWords.slice(0, 10), // Top 10
+        missing: missingWords.slice(0, 5) // Top 5 suggestions
     };
 };
 
@@ -88,49 +76,12 @@ router.post('/analyze', auth, upload.single('resume'), async (req, res) => {
         let resumeText = '';
 
         // Parse File
-        // Parse File
-        console.log(`Processing file: ${req.file.originalname}, Size: ${req.file.size}, Type: ${req.file.mimetype}`);
-
         if (req.file.mimetype === 'application/pdf') {
-            try {
-                // Basic options for pdf-parse to be more robust
-                const options = {
-                    pagerender: function (pageData) {
-                        return pageData.getTextContent()
-                            .then(function (textContent) {
-                                let lastY, text = '';
-                                for (let item of textContent.items) {
-                                    if (lastY == item.transform[5] || !lastY) {
-                                        text += item.str;
-                                    }
-                                    else {
-                                        text += '\n' + item.str;
-                                    }
-                                    lastY = item.transform[5];
-                                }
-                                return text;
-                            });
-                    }
-                }
-                const data = await pdfParse(req.file.buffer, options);
-                resumeText = data.text;
-                if (!resumeText || resumeText.trim().length === 0) {
-                    return res.status(400).json({ msg: 'PDF text could not be extracted. Try converting to a text-based PDF.' });
-                }
-            } catch (pdfErr) {
-                console.error('PDF Parse Error:', pdfErr);
-                return res.status(400).json({ msg: `PDF Error: ${pdfErr.message || 'Corrupt file'}` });
-            }
+            const data = await pdf(req.file.buffer);
+            resumeText = data.text;
         } else if (req.file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-            try {
-                const result = await mammoth.extractRawText({ buffer: req.file.buffer });
-                resumeText = result.value;
-            } catch (docxErr) {
-                console.error('DOCX Parse Error:', docxErr);
-                return res.status(400).json({ msg: 'Corrupt or invalid DOCX file.' });
-            }
-        } else if (req.file.mimetype === 'application/msword') {
-            return res.status(400).json({ msg: 'Old .doc format is not supported. Please save as .docx or PDF.' });
+            const result = await mammoth.extractRawText({ buffer: req.file.buffer });
+            resumeText = result.value;
         } else {
             return res.status(400).json({ msg: 'Invalid file format. Upload PDF or DOCX.' });
         }
@@ -206,103 +157,16 @@ router.post('/analyze', auth, upload.single('resume'), async (req, res) => {
         // Cap score at 100
         const finalScore = Math.min(Math.round(totalScore), 100);
 
-        // --- AI ENHANCEMENT ---
-        let aiReport = null;
-        if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "YOUR_GEMINI_API_KEY_HERE") {
-            try {
-                const prompt = `
-                    Analyze this resume text against the job description below.
-                    Provide a detailed report in JSON format with exactly these keys:
-                    "aiScore" (number 0-100),
-                    "aiSummary" (string, 2 sentences),
-                    "strengths" (array of 3 points),
-                    "weaknesses" (array of 3 points),
-                    "suggestions" (array of 5 specific action items).
-
-                    Resume Content:
-                    ${resumeText.substring(0, 3000)}
-
-                    Job Description:
-                    ${jobDescription || "General job market standard"}
-                `;
-
-                const result = await model.generateContent(prompt);
-                const response = await result.response;
-                const text = response.text();
-                // Extract JSON if it's wrapped in markers
-                const jsonMatch = text.match(/\{[\s\S]*\}/);
-                if (jsonMatch) {
-                    aiReport = JSON.parse(jsonMatch[0]);
-                }
-            } catch (aiErr) {
-                console.error("Gemini AI Analysis failed:", aiErr);
-            }
-        }
-
-        // --- FALLBACK HEURISTICS (Enhanced NLP) ---
-        if (!aiReport) {
-            const words = tokenizer.tokenize(resumeText.toLowerCase());
-
-            // 1. Action Verbs Check
-            const actionVerbs = ['developed', 'managed', 'led', 'created', 'implemented', 'designed', 'achieved', 'increased', 'coordinated', 'launched'];
-            const foundVerbs = actionVerbs.filter(v => resumeText.toLowerCase().includes(v));
-
-            // 2. Quantification Check (Searching for numbers + % or keywords)
-            const numbersFound = (resumeText.match(/\d+/g) || []).length;
-            const percentFound = (resumeText.match(/%/g) || []).length;
-            const quantified = numbersFound > 5 || percentFound > 1;
-
-            const fallbackStrengths = [];
-            if (sectionData.found.includes('experience')) fallbackStrengths.push("Professional Experience section is well-structured.");
-            if (foundVerbs.length > 3) fallbackStrengths.push(`Strong vocabulary with ${foundVerbs.length} powerful action verbs.`);
-            if (quantified) fallbackStrengths.push("Excellent use of data and metrics to quantify achievements.");
-            if (sectionData.found.includes('skills')) fallbackStrengths.push("Comprehensive technical skills section detected.");
-
-            const fallbackWeaknesses = [];
-            if (sectionData.missing.length > 0) fallbackWeaknesses.push(`Missing critical sections: ${sectionData.missing.join(', ')}.`);
-            if (foundVerbs.length < 2) fallbackWeaknesses.push("Weak impact verbs. Use words like 'Spearheaded' or 'Optimized'.");
-            if (!quantified) fallbackWeaknesses.push("Achievements are vague. Add more numbers, percentages, or dollar amounts.");
-            if (keywordScore < 50) fallbackWeaknesses.push("Low keyword density for modern automated screening systems.");
-
-            const fallbackSuggestions = [
-                "Incorporate more industry-specific technical keywords from the Job Description.",
-                "Ensure your email and LinkedIn profile are hyperlinked correctly.",
-                "Replace passive voice with active power verbs in your experience bullet points.",
-                "Add a 'Certifications' or 'Projects' section to highlight continuous learning.",
-                "Ensure consistent date formatting (e.g., month/year) throughout the document."
-            ];
-
-            // Re-calculate final score based on new heuristics
-            let refinedScore = finalScore;
-            if (foundVerbs.length > 5) refinedScore += 5;
-            if (quantified) refinedScore += 5;
-            if (sectionData.missing.length > 2) refinedScore -= 10;
-
-            const finalRefined = Math.min(Math.max(refinedScore, 20), 100);
-
-            aiReport = {
-                aiScore: finalRefined,
-                aiSummary: finalRefined > 80
-                    ? "Impressive resume! Highly professional and optimized for modern ATS filters."
-                    : "Consistent formatting, but needs more impact-driven language and keyword targeting.",
-                strengths: fallbackStrengths.slice(0, 3).length > 0 ? fallbackStrengths.slice(0, 3) : ["Clean layout", "Readable font size", "Proper file format"],
-                weaknesses: fallbackWeaknesses.slice(0, 3),
-                suggestions: fallbackSuggestions
-            };
-        }
+        // Generate AI Summary
+        let summary = "Good effort!";
+        if (finalScore > 85) summary = "Excellent! Your resume is highly optimized for ATS.";
+        else if (finalScore > 70) summary = "Good, but needs keyword optimization for this specific role.";
+        else summary = "Needs significant improvements to pass screening.";
 
         res.json({
-            score: aiReport.aiScore,
-            summary: aiReport.aiSummary,
-            improvements: [
-                ...aiReport.weaknesses.map(w => ({ type: 'major', text: w })),
-                ...aiReport.suggestions.map(s => ({ type: 'minor', text: s }))
-            ],
-            aiDetails: {
-                strengths: aiReport.strengths,
-                weaknesses: aiReport.weaknesses,
-                suggestions: aiReport.suggestions
-            },
+            score: finalScore,
+            summary,
+            improvements,
             details: {
                 keywordsMatched: keywordData.matched,
                 sectionsFound: sectionData.found
